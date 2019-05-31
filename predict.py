@@ -13,9 +13,9 @@ hidden_size = 64
 num_layers = 2
 num_classes = 28
 num_candidates = 9
-batch_size = 2048
-# model_path = 'model/Adam with batch_size=2048;epoch=300.pt'
-model_path = 'model/Adam with batch_size=2048;epoch=300_fixed.pt'
+batch_size = 128
+model_path = 'model/Adam with batch_size=2048;epoch=xx.pt'
+# log = 'Adam with batch_size=2048;epoch=xx'
 
 
 def generate(name):
@@ -23,15 +23,15 @@ def generate(name):
     # you should use the 'list' not 'set' to obtain the full dataset, I use 'set' just for test and acceleration.
     hdfs = set()
     # hdfs = []
+    lines = 0
     with open('data/' + name, 'r') as f:
-        line_num = 0
         for line in f.readlines():
-            line_num += 1
+            lines += 1
+            if lines >= 150000:
+                break
             line = list(map(lambda n: n - 1, map(int, line.strip().split())))
             line = line + [-1] * (window_size + 1 - len(line))
             hdfs.add(tuple(line))
-            if line_num >= 10000:
-                break
             # hdfs.append(tuple(line))
     print('Number of sessions({}): {}'.format(name, len(hdfs)))
     return hdfs
@@ -74,43 +74,48 @@ if __name__ == '__main__':
     test_abnormal_loader = generate('hdfs_test_abnormal')
     TP = 0
     FP = 0
-    
+    FP_cnt = 0
+    # Loss and optimizer
     criterion = nn.CrossEntropyLoss()
     optimizer = optim.Adam(model.parameters())
 
     # Test the model
     start_time = time.time()
-    
-    # with torch.no_grad():
-    # label_fp = []
+    output_tensor = torch.zeros([batch_size, num_classes])
+    label_tensor = torch.zeros([1, batch_size], dtype=torch.int)
+    with torch.no_grad():
+        for line in test_normal_loader:
+            for i in range(len(line) - window_size):
+                seq = line[i:i + window_size]
+                label = line[i + window_size]
+                seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size, input_size).to(device)
+                label = torch.tensor(label).view(-1).to(device)
+                output = model(seq)
+                predicted = torch.argsort(output, 1)[0][-num_candidates:]
+                
 
-    for line in test_normal_loader:
-        for i in range(len(line) - window_size):
-            seq = line[i:i + window_size]  # current history window
-            label = line[i + window_size]  # current target to predict
-            seq = torch.tensor(seq, dtype=torch.float).view(-1, window_size, input_size).to(device)
-            label = torch.tensor(label).view(-1).to(device)
-            output = model(seq)
-            predicted = torch.argsort(output, 1)[0][-num_candidates:]
-            if label not in predicted:
-                FP += 1
-                # output.requires_grad = True                    
-                # print(output.dtype)
-                # print(output.requires_grad)
 
-                print(predicted)
-                print(output)  # 1*28
-                print(label)   # 1*1
-                loss = criterion(output, label)
+                
+                if label not in predicted:
+                    if FP_cnt >= batch_size:
+                        # model.train()
+                        # output = model(seq)
+                        output_tensor[FP_cnt, :] = output[0:].clone()
+                        label_tensor[FP_cnt] = label
+                        loss = criterion(output, label)
+                        
+                        # Backward and optimize
+                        optimizer.zero_grad()
+                        print(loss)
+                        loss.backward()
+                        train_loss += loss.item()
+                        optimizer.step()
+                        FP_cnt = 0
+                        # model.eval()
+                    FP += 1
+                    FP_cnt += 1
+                    break
 
-                # Backward and optimize
-                optimizer.zero_grad()
-                loss.backward()
-                train_loss += loss.item()
-                optimizer.step()
-
-                break
-    
     with torch.no_grad():
         for line in test_abnormal_loader:
             for i in range(len(line) - window_size):
